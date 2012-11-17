@@ -1,0 +1,25 @@
+set A ap
+set B le
+echo I like ?A"p"?B
+echo ?A?B?unknown
+echo ?A?unknown?B
+echo what?unknown
+echo
+ls m*
+ls *.c
+ls tests/*.c
+echo
+printenv HOME
+echo
+sleep 2 &
+ps aux | grep sleep
+echo
+sleep 2
+echo
+ifconfig > out
+echo >> out
+ifconfig | grep lo >> out
+echo
+cd ~
+ls
+pwd
