@@ -453,18 +453,49 @@ int file_exist(const char *path) {
 }
 
 /* Look up a command, returns a newly allocated string or NULL */
-char* lookup_command(char *command) {
-    int i = 0;
-    for ( ; i<var_path_count; i++) {
-        char *path = var_paths[i];
-        char *fullpath = merge_path(path, command);
-        if ( file_exist(fullpath) == 0) {
-            return fullpath;
-        } else {
-            free(fullpath);
+char* lookup_command(Command *comm) {
+    char *command = comm->words->word;
+    char *path = NULL;
+    
+    // check for executable file
+    if (comm->flags->cmd_file) {
+        // prepend the exec file path with current directory
+        char *pwd = getenv("PWD");
+        char *file = comm->words->word;
+        file++; // skip the beginning dot
+        int len_a = (int)strlen(pwd), len_b = (int)strlen(file);
+        path = malloc( (len_a+len_b+1)*sizeof(char) );
+        path[0] = 0;
+        strcat(path, pwd);
+        strcat(path, file);
+    }
+    else {
+        // examine PATH
+        int i = 0;
+        for ( ; i<var_path_count; i++) {
+            path = var_paths[i];
+            char *fullpath = merge_path(path, command);
+            if ( file_exist(fullpath) == 0) {
+                return fullpath;
+            } else {
+                free(fullpath);
+            }
         }
     }
-    return (char *)NULL;
+    
+    if (path == NULL) {
+        if ( is_directory(command) == 0 ) {
+            printf("%s: is a directory\n", command);
+        } else {
+            if ( is_file(command) == 0 ) {
+                printf("%s: is a file\n", command);
+            } else {
+                printf("%s: command not found\n", command);
+            }
+        }
+    }
+    
+    return path;
 }
 
 /* For use with execute_command_pipeline() */
@@ -510,10 +541,8 @@ int execute_command_pipeline(Command *comm) {
         pipe(fds);
         
         // prepare for forking
-        char *path = lookup_command(cmd->words->word);
+        char *path = lookup_command(cmd);
         if (path == NULL) {
-            printf("%s: command not found\n", cmd->words->word);
-            free(path);
             return 0;
         }
         char **args = wordlist_to_argv(cmd->words);
@@ -561,10 +590,8 @@ int execute_command_pipeline(Command *comm) {
         filedes[PIPE_READ] = in;
         last_flag = r_input_direction;
     }
-    char *path = lookup_command(cmd->words->word);
+    char *path = lookup_command(cmd);
     if (path == NULL) {
-        printf("%s: command not found\n", cmd->words->word);
-        free(path);
         return 0;
     }
     if (cmd->redir != NULL) {
@@ -660,14 +687,37 @@ int msh_exit(Command *comm) {
 int msh_cd(Command *comm) {
     char **argv = wordlist_to_argv(comm->words);
     char *p = argv[1];
+    int r;
+    char *newpwd = NULL;
+    
     if (strlen(p) == 0) {
-        chdir(getenv("HOME"));
-        return 0;
+        newpwd = getenv("HOME");
+        r = chdir(newpwd);
+    } else {
+        r = chdir(p);
     }
-    int r = chdir(p);
     if (r == -1) {
         perror("chdir");
+        return 0;
     }
+    
+    if (newpwd == NULL) {
+        char *pwd = getenv("PWD");
+        if (p[0] == '\\') {
+            setenv("PWD", p, 1);
+        }
+        else {
+            int len_a = (int)strlen(pwd), len_b = (int)strlen(p);
+            newpwd = malloc( (len_a+len_b+1)*sizeof(char) );
+            strcpy(newpwd, pwd);
+            strcat(newpwd, "/");
+            strcat(newpwd, p);
+            setenv("PWD", newpwd, 1);
+        }
+    } else {
+        setenv("PWD", newpwd, 1);
+    }
+    
     free(argv);
     return 0;
 }
@@ -802,35 +852,9 @@ int execute_command(Command *comm) {
         return execute_command_pipeline(comm);
     }
     
-    char *path;
-    
-    // check for executable file
-    if (comm->flags->cmd_file) {
-        // prepend the exec file path with current directory
-        char *pwd = getenv("PWD");
-        char *file = comm->words->word;
-        file++; // skip the beginning dot
-        int len_a = (int)strlen(pwd), len_b = (int)strlen(file);
-        path = malloc( (len_a+len_b+1)*sizeof(char) );
-        path[0] = 0;
-        strcat(path, pwd);
-        strcat(path, file);
-    }
-    else {
-        // look up (the first) command
-        path = lookup_command(command);
-        if (path == NULL) {
-            if ( is_directory(command) == 0 ) {
-                printf("%s: is a directory\n", command);
-            } else {
-                if ( is_file(command) == 0 ) {
-                    printf("%s: is a file\n", command);
-                } else {
-                    printf("%s: command not found\n", command);
-                }
-            }
-            return 0;
-        }
+    char *path = lookup_command(comm);
+    if (path == NULL) {
+        return 0;
     }
     
     char **args = wordlist_to_argv(comm->words);
