@@ -525,6 +525,12 @@ int do_piping(int pipe_in, int pipe_out, char *path, char **args) {
         exit(0);
     } else {
         chpid = pid;
+        int status;
+        waitpid(pid, &status, 0);
+        if (is_debugging == '1') {
+            printf("child %i exited with %i\n", pid, status);
+        }
+        chpid = 0;
     }
     return pid;
 }
