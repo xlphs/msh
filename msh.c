@@ -500,6 +500,8 @@ char* lookup_command(Command *comm) {
 
 /* For use with execute_command_pipeline() */
 int do_piping(int pipe_in, int pipe_out, char *path, char **args) {
+    printf("pipe_in: %i\npipe_out: %i\n", pipe_in, pipe_out);
+    
     int pid = fork();
     if (pid < 0) {
         perror("fork");
@@ -570,6 +572,7 @@ int execute_command_pipeline(Command *comm) {
         status = do_piping(redirfd, fds[PIPE_WRITE], path, args);
         
         close(fds[PIPE_WRITE]);
+        if (in > 0) close(in);
         
         // keep track of the read end of the pipe
         // the next child process will read from there
@@ -612,8 +615,8 @@ int execute_command_pipeline(Command *comm) {
     
     char **args = wordlist_to_argv(cmd->words);
     status = execute_command_simple(path, args, filedes, last_flag, c_foreground, *cmd->flags);
-    if (filedes[PIPE_WRITE] > 0) {
-        close(filedes[PIPE_WRITE]);
+    if (filedes[PIPE_READ] > 0) {
+        close(filedes[PIPE_READ]);
     }
     free(args);
     return status;
