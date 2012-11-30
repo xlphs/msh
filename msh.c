@@ -862,6 +862,15 @@ int msh_which(Command *comm) {
     return 0;
 }
 
+/* Insert '?' at the beginning of a given string */
+char *shellvar_format(const char *s) {
+    char *var = malloc( (2+strlen(s))*sizeof(char) );
+    var[0] = '?';
+    var[1] = '\0';
+    strcat(var, s);
+    return var;
+}
+
 int msh_set(Command *comm) {
     WordList *name = comm->words->next;
     if (name->word == NULL) return 0;
@@ -869,11 +878,7 @@ int msh_set(Command *comm) {
     WordList *val = name->next;
     if (val->word == NULL) return 0;
     
-    // prepend ? to variable name
-    char *var = malloc( (2+strlen(name->word))*sizeof(char) );
-    var[0] = '?';
-    var[1] = '\0';
-    strcat(var, name->word);
+    char *var = shellvar_format(name->word);
     if (is_debugging == '1') printf("%s => %s\n", var, val->word);
     
     HashItem *item = hashtable_find(global_hashtable, var);
@@ -893,7 +898,11 @@ int msh_set(Command *comm) {
 int msh_unset(Command *comm) {
     WordList *name = comm->words->next;
     if (name->word == NULL) return 0;
-    hashtable_remove(global_hashtable, name->word);
+    
+    char *var = shellvar_format(name->word);
+    hashtable_remove(global_hashtable, var);
+    free(var);
+    
     return 0;
 }
 

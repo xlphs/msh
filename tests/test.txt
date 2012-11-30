@@ -7,6 +7,14 @@ echo "> echo I like ?A\"p\"?B"
 echo I like ?A"p"?B
 echo "> echo ?A?B?unknown"
 echo ?A?B?unknown
+echo "> set A \"A has been changed\""
+set A "A has been changed"
+echo "> echo ?A"
+echo ?A
+echo "> unset A"
+unset A
+echo "> echo ?A"
+echo ?A
 echo
 echo "> ### Demonstrating built-in functions"
 echo "> which echo"
@@ -15,18 +23,18 @@ echo "> which kill"
 which kill
 echo
 echo "> ### Demonstrating commands"
-echo "> ls *"
-ls *
+echo "> ls -al"
+ls -al
 echo "> sleep 2 &"
 sleep 2 &
-echo "> ps aux | grep sleep"
-ps aux | grep sleep
+echo "> ps"
+ps
 echo
 echo While sleep is sleeping...
 echo do something useful
 echo "> ifconfig > my_network"
 ifconfig > my_network
-echo Let us append EOM to my_network
+echo Let's append EOM to my_network
 echo "> echo >> my_network"
 echo >> my_network
 echo "> echo End of Message >> my_network"
@@ -40,16 +48,20 @@ echo I will remove the my_network file now
 echo "> rm my_network"
 rm my_network
 echo
-echo Let us check back on the sleep...
-echo "> ps aux | grep sleep"
-ps aux | grep sleep
+echo Let's check back on the sleep...
+echo "> ps | grep sleep"
+ps | grep sleep
 echo
-echo Let us sleep some more, be patient...
+echo Let's sleep some more, be patient...
 sleep 2
 echo
 echo Look, no sleep!
-echo "> ps aux | grep sleep"
-ps aux | grep sleep
+echo "> ps | grep sleep"
+ps | grep sleep
+echo
+echo Let's check for zombies
+echo "> ps -f | grep defunct"
+ps -f | grep defunct
 echo
 echo "> ### Other stuff"
 echo "> cd ~"
