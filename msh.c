@@ -13,11 +13,10 @@
 #include <wordexp.h>
 
 #define MAX_CHAR_BUFF_LEN  512
-#define MAX_HASHTABLE_LEN  1024
+#define MAX_HASHTABLE_LEN  8192
 #define MSH_EXITINT        -99
 
 extern int errno;
-extern char **environ;
 
 /* Constants for piping and redirection */
 const int PIPE_READ = 0;
@@ -27,10 +26,6 @@ const int FD_WRITE = 1;
 
 /* The current user's name */
 static char *username;
-
-/* Split PATH components */
-static char **var_paths;
-static char var_path_count;
 
 /* Set global debugging on or off
  To turn on debugging: debug 1
@@ -50,9 +45,12 @@ static unsigned int bgchld = 0;
 
 static jmp_buf toplevel_jmp;
 
+/* Currently in a subshell or not */
+static int subshell = 0;
+
 typedef struct WORD_LIST {
     char *word;
-    char process; /* Process in wordlist_to_argv(1) */
+    char process; /* Do additional processing in wordlist_to_argv() */
     struct WORD_LIST *next;
 } WordList;
 
@@ -113,6 +111,12 @@ int execute_command_simple(char *, char **, int *,
                            command_flags);
 
 void trap_exit(int s) {
+    if (chpid > 0) {
+        // forward the signal
+        kill(chpid, s);
+        return;
+    }
+    
     if (s == SIGSEGV || s == SIGABRT) {
         longjmp(toplevel_jmp, 3);
         return;
@@ -214,31 +218,10 @@ unsigned int hash_string(const char *s) {
     }
     
     // Reduce hash value, not a good idea
-    // but I just want a tiny hash table
-    while (!(hash < MAX_HASHTABLE_LEN)) {
-        hash = hash % 64; // 64 is a power of 2
-    }
+    // but I just want a small hash table
+    hash = hash % MAX_HASHTABLE_LEN;
     
     return hash;
-}
-
-/* Returns a newly allocated HashItem */
-HashItem* hashtable_insert(HashTable *t, const char *s) {
-    HashItem *item = alloc_hashitem();
-    int hash = hash_string(s);
-    item->hash = hash;
-    item->key = malloc( (strlen(s)+1)*sizeof(char) );
-    strcpy(item->key, s);
-    if (t->entries[hash] == NULL) {
-        t->entries[hash] = item;
-    } else {
-        HashItem *last = t->entries[hash];
-        while (last->next != NULL) {
-            last = last->next;
-        }
-        last->next = item;
-    }
-    return item;
 }
 
 /* Returns an existing HashItem or NULL,
@@ -273,13 +256,36 @@ HashItem* hashtable_find(HashTable *t, const char *s) {
     HashItem *i = t->entries[hash];
     
     if (i == NULL) return (HashItem *)NULL;
-    while (i->next != NULL) {
-        if (strcmp(s, i->key) == 0) {
+    
+    while (i != NULL) {
+        if (strncmp(s, i->key, strlen(s)) == 0) {
             return i;
         }
         i = i->next;
     }
-    return i;
+    return (HashItem *)NULL;
+}
+
+/* Returns a newly allocated HashItem or an existing one */
+HashItem* hashtable_insert(HashTable *t, const char *s) {
+    HashItem *item = hashtable_find(t, s);
+    if (item != NULL) return item;
+    
+    item = alloc_hashitem();
+    int hash = hash_string(s);
+    item->hash = hash;
+    item->key = malloc( (strlen(s)+1)*sizeof(char) );
+    strcpy(item->key, s);
+    if (t->entries[hash] == NULL) {
+        t->entries[hash] = item;
+    } else {
+        HashItem *last = t->entries[hash];
+        while (last->next != NULL) {
+            last = last->next;
+        }
+        last->next = item;
+    }
+    return item;
 }
 
 void dealloc_redir(Redirect *r) {
@@ -359,6 +365,45 @@ char* merge_path(char *path, char*file) {
     strcat(s, "/");
     strcat(s, file);
     return s;
+}
+
+/* Add/update available system commands in PATH */
+void msh_hash_all_commands() {
+    int cmdcount = 0;
+    // split PATH into an array of paths
+    char *path = getenv("PATH");
+    char *cpath = malloc(strlen(path)*sizeof(char));
+    strcpy(cpath, path);
+    char *pch = strtok(cpath, ":");
+    // scan through each path
+    while (pch != NULL) {
+        DIR *pd;
+        struct dirent *pdir;
+        
+        if ((pd = opendir(pch)) == NULL) {
+            perror(pch);
+            continue;
+        }
+        do {
+            if ((pdir = readdir(pd)) != NULL) {
+                if (strcmp(pdir->d_name, ".") != 0 &&
+                    strcmp(pdir->d_name, "..") != 0)
+                {
+                    char *cmdpath = merge_path(pch, pdir->d_name);
+                    HashItem *i = hashtable_insert(global_hashtable, pdir->d_name);
+                    i->data = cmdpath;
+                    cmdcount++;
+                }
+            }
+        } while (pdir != NULL);
+        
+        closedir(pd);
+        
+        pch = strtok(NULL, ":");
+    }
+    free(cpath);
+    
+    if (is_debugging == '1') printf("# of commands found: %i\n", cmdcount);
 }
 
 /* Converts WordList to an array of strings, for use with execv(). */
@@ -445,13 +490,6 @@ char** wordlist_to_argv(WordList *list) {
     return argv;
 }
 
-/* If path exists, returns 0, otherwise -1.
-   For use with lookup_command() */
-int file_exist(const char *path) {
-    struct stat info;
-    return stat(path, &info) < 0 ? -1 : 0;
-}
-
 /* Look up a command, returns a newly allocated string or NULL */
 char* lookup_command(Command *comm) {
     char *command = comm->words->word;
@@ -470,19 +508,16 @@ char* lookup_command(Command *comm) {
         strcat(path, file);
     }
     else {
-        // examine PATH
-        int i = 0;
-        for ( ; i<var_path_count; i++) {
-            path = var_paths[i];
-            char *fullpath = merge_path(path, command);
-            if ( file_exist(fullpath) == 0) {
-                return fullpath;
+        // look in the hash table
+        HashItem *i = hashtable_find(global_hashtable, command);
+        if (i != NULL) {
+            if (i->data != NULL) {
+                path = strdup(i->data);
             } else {
-                free(fullpath);
+                path = strdup(command);
             }
         }
     }
-    
     if (path == NULL) {
         if ( is_directory(command) == 0 ) {
             printf("%s: is a directory\n", command);
@@ -494,20 +529,19 @@ char* lookup_command(Command *comm) {
             }
         }
     }
-    
     return path;
 }
 
 /* For use with execute_command_pipeline() */
 int do_piping(int pipe_in, int pipe_out, char *path, char **args) {
-    printf("pipe_in: %i\npipe_out: %i\n", pipe_in, pipe_out);
-    
     int pid = fork();
     if (pid < 0) {
         perror("fork");
         return -1;
     }
     if (pid == 0) {
+        subshell = 1;
+        
         if (pipe_in != STDIN_FILENO) {
             dup2(pipe_in, STDIN_FILENO);
             close(pipe_in);
@@ -526,13 +560,10 @@ int do_piping(int pipe_in, int pipe_out, char *path, char **args) {
         }
         exit(0);
     } else {
-        chpid = pid;
-        int status;
-        waitpid(pid, &status, 0);
-        if (is_debugging == '1') {
-            printf("child %i exited with %i\n", pid, status);
-        }
-        chpid = 0;
+        bgchld++;
+        init_child_traps();
+        setpgid(0, 0);
+        // no wait() here
     }
     return pid;
 }
@@ -550,9 +581,7 @@ int execute_command_pipeline(Command *comm) {
         
         // prepare for forking
         char *path = lookup_command(cmd);
-        if (path == NULL) {
-            return 0;
-        }
+        if (path == NULL) return 0;
         char **args = wordlist_to_argv(cmd->words);
         
         // check for redirection
@@ -593,8 +622,8 @@ int execute_command_pipeline(Command *comm) {
     }
     
     /* Last stage of the pipeline,
-     set STDIN be the read end of the previous pipe
-     and output to the current STDOUT. */
+       set STDIN be the read end of the previous pipe
+       and output to the current STDOUT. */
     if (in != STDIN_FILENO) {
         filedes[PIPE_READ] = in;
         last_flag = r_input_direction;
@@ -614,7 +643,9 @@ int execute_command_pipeline(Command *comm) {
     }
     
     char **args = wordlist_to_argv(cmd->words);
-    status = execute_command_simple(path, args, filedes, last_flag, c_foreground, *cmd->flags);
+    status = execute_command_simple(path, args, filedes, last_flag, c_foreground,
+                                    *global_command->flags);
+    
     if (filedes[PIPE_READ] > 0) {
         close(filedes[PIPE_READ]);
     }
@@ -637,6 +668,8 @@ int execute_command_simple(char *path, char **args, int fds[2],
     }
     else if (pid == 0) {
         // child process
+        subshell = 1;
+        
         switch (fd_flag) {
             case r_appending_to:
             case r_output_direction: {
@@ -689,6 +722,67 @@ int execute_command_simple(char *path, char **args, int fds[2],
     return status;
 }
 
+/* Returns 1 for true, 0 for false. */
+int is_builtin_cmd(char *command) {
+    HashItem *i = hashtable_find(global_hashtable, command);
+    if (i != NULL && i->bfun != NULL) return 1;
+    return 0;
+}
+
+/* Returns 0, or MSH_EXITINT */
+int execute_command_builtin(Command *comm, int fds[2],
+                            enum redir_action fd_flag)
+{
+    HashItem *i = hashtable_find(global_hashtable, comm->words->word);
+    if (i == NULL) return 0;
+    
+    if (strcmp(i->key, "echo") != 0) {
+        return i->bfun(comm);
+    }
+    
+    // the following is for echo only
+    
+    int pid = fork();
+    int status = 0;
+    
+    if (pid < 0) {
+        printf("fork failed\n");
+        return -1;
+    }
+    else if (pid == 0) {
+        // child process
+        subshell = 1;
+        
+        switch (fd_flag) {
+            case r_appending_to:
+            case r_output_direction: {
+                dup2(fds[PIPE_WRITE], STDOUT_FILENO);
+                close(fds[PIPE_WRITE]);
+            } break;
+            case r_input_direction: {
+                dup2(fds[PIPE_READ], STDIN_FILENO);
+                close(fds[PIPE_READ]);
+            } break;
+            case r_input_output: {
+                dup2(fds[PIPE_READ], STDIN_FILENO);
+                dup2(fds[PIPE_WRITE], STDOUT_FILENO);
+                close(fds[PIPE_READ]);
+                close(fds[PIPE_WRITE]);
+            } break;
+            default: break;
+        }
+        
+        int status = i->bfun(comm);
+        exit(status);
+    }
+    else {
+        chpid = pid;
+        waitpid(pid, &status, 0);
+        chpid = 0;
+    }
+    return status;
+}
+
 int msh_exit(Command *comm) {
     return MSH_EXITINT;
 }
@@ -698,7 +792,7 @@ int msh_cd(Command *comm) {
     char *p = argv[1];
     int r;
     char *newpwd = NULL;
-    
+    // first changed directory
     if (strlen(p) == 0) {
         newpwd = getenv("HOME");
         r = chdir(newpwd);
@@ -709,10 +803,10 @@ int msh_cd(Command *comm) {
         perror("chdir");
         return 0;
     }
-    
+    // then update PWD
     if (newpwd == NULL) {
         char *pwd = getenv("PWD");
-        if (p[0] == '\\') {
+        if (p[0] == '/') {
             setenv("PWD", p, 1);
         }
         else {
@@ -731,6 +825,62 @@ int msh_cd(Command *comm) {
     return 0;
 }
 
+int msh_pwd(Command *comm) {
+    printf("%s\n", getenv("PWD"));
+    return 0;
+}
+
+int msh_mkdir(Command *comm) {
+    WordList *dirname = comm->words->next;
+    if (dirname->word == NULL) {
+        printf("mkdir: Invalid path\n");
+        return 0;
+    }
+    if ( mkdir(dirname->word, 0755) == -1) {
+        perror("mkdir");
+    }
+    
+    return 0;
+}
+
+int msh_echo(Command *comm) {
+    if (comm->words->next == NULL) {
+        printf("\n");
+        return 0;
+    }
+    
+    char **argv = wordlist_to_argv(comm->words);
+    argv++;
+    while (*argv != NULL) {
+        printf("%s", *argv);
+        argv++;
+        if (*argv != NULL) printf(" ");
+    }
+    printf("\n");
+    
+    return 0;
+}
+
+int msh_which(Command *comm) {
+    WordList *cmd = comm->words->next;
+    if (cmd->word == NULL) {
+        return 0;
+    }
+    // look in the hash table
+    HashItem *i = hashtable_find(global_hashtable, cmd->word);
+    if (i != NULL) {
+        if (i->bfun != NULL) {
+            printf("%s: shell built-in command\n", cmd->word);
+        } else {
+            printf("%s\n", i->data);
+        }
+    } else {
+        printf("%s: not found\n", cmd->word);
+    }
+    
+    return 0;
+}
+
 int msh_set(Command *comm) {
     WordList *name = comm->words->next;
     if (name->word == NULL) return 0;
@@ -738,9 +888,16 @@ int msh_set(Command *comm) {
     WordList *val = name->next;
     if (val->word == NULL) return 0;
     
-    HashItem *item = hashtable_find(global_hashtable, name->word);
+    // prepend ? to variable name
+    char *var = malloc( (2+strlen(name->word))*sizeof(char) );
+    var[0] = '?';
+    var[1] = '\0';
+    strcat(var, name->word);
+    if (is_debugging == '1') printf("%s => %s\n", var, val->word);
+    
+    HashItem *item = hashtable_find(global_hashtable, var);
     if (item == NULL) {
-        item = hashtable_insert(global_hashtable, name->word);
+        item = hashtable_insert(global_hashtable, var);
         item->data = malloc( (strlen(val->word)+1)*sizeof(char) );
         strcpy(item->data, val->word);
     } else {
@@ -766,49 +923,35 @@ int msh_setdebug(Command *comm) {
     return 0;
 }
 
-int msh_hash(Command *comm) {
-    WordList *wl = comm->words->next;
-    if (wl->word == NULL) return 0;
-    printf("%i\n", hash_string(wl->word));
+int msh_rehash(Command *comm) {
+    msh_hash_all_commands();
     return 0;
 }
 
-int msh_parse(Command *comm) {
-    WordList *wl = comm->words->next;
-    while (wl != NULL) {
-        printf("%s%c", wl->word, (wl->next == NULL) ? ' ' : ',');
-        wl = wl->next;
+int msh_sendsignal(Command *comm) {
+    WordList *w_signal = comm->words->next;
+    if (w_signal->word == NULL) return 0;
+    WordList *w_pid = w_signal->next;
+    if (w_pid->word == NULL) return 0;
+    
+    // assuming signal is an integer, eg. -9
+    char *signal = w_signal->word;
+    signal++;
+    int sig = atoi(signal);
+    int pid = atoi(w_pid->word);
+    
+    if (sig == 0 || pid < 1) return 0;
+    
+    if (kill(pid, sig) == -1) {
+        perror("kill");
+    } else {
+        printf("signal %i sent to process %i\n", sig, pid);
     }
-    printf("\nredir:");
-    Redirect *r = comm->redir;
-    while (r != NULL) {
-        printf("%s%c", r->filename, (r->next == NULL) ? ' ' : ',');
-        r = r->next;
-    }
-    printf("\npipe:");
-    Command *c = comm->pipe_to;
-    while (c != NULL) {
-        printf("%s%c", c->words->word, (c->pipe_to == NULL) ? ' ' : ',');
-        c = c->pipe_to;
-    }
-    printf("\n");
+    
     return 0;
 }
 
-int msh_printenv(Command *comm) {
-    WordList *wl = comm->words->next;
-    if (wl->word == NULL) {
-        char **env = environ;
-        for ( ; *env; env++) {
-            printf("%s\n", *env);
-        }
-    }
-    else {
-        printf("%s\n", getenv(wl->word));
-    }
-    return 0;
-}
-
+/* Initialize built-in commands, will overwrite system commands */
 void init_builtin_cmd() {
     HashItem *i;
     
@@ -818,43 +961,36 @@ void init_builtin_cmd() {
     i = hashtable_insert(global_hashtable, "cd");
     i->bfun = msh_cd;
     
+    i = hashtable_insert(global_hashtable, "pwd");
+    i->bfun = msh_pwd;
+    
+    i = hashtable_insert(global_hashtable, "mkdir");
+    i->bfun = msh_mkdir;
+    
+    i = hashtable_insert(global_hashtable, "echo");
+    i->bfun = msh_echo;
+    
+    i = hashtable_insert(global_hashtable, "which");
+    i->bfun = msh_which;
+    
+    i = hashtable_insert(global_hashtable, "kill");
+    i->bfun = msh_sendsignal;
+    
     i = hashtable_insert(global_hashtable, "set");
     i->bfun = msh_set;
     
     i = hashtable_insert(global_hashtable, "unset");
     i->bfun = msh_unset;
     
-    i = hashtable_insert(global_hashtable, "hash");
-    i->bfun = msh_hash;
+    i = hashtable_insert(global_hashtable, "rehash");
+    i->bfun = msh_rehash;
     
     i = hashtable_insert(global_hashtable, "debug");
     i->bfun = msh_setdebug;
-    
-    i = hashtable_insert(global_hashtable, "parse");
-    i->bfun = msh_parse;
-    
-    i = hashtable_insert(global_hashtable, "printenv");
-    i->bfun = msh_printenv;
-}
-
-/* Returns 1 for true, 0 for false. */
-int is_builtin_cmd(char *command) {
-    return (hashtable_find(global_hashtable, command) != NULL) ? 1:0;
-}
-
-/* Returns 0, or MSH_EXITINT */
-int execute_command_builtin(Command *comm) {
-    HashItem *i = hashtable_find(global_hashtable, comm->words->word);
-    return i->bfun(comm);
 }
 
 int execute_command(Command *comm) {
     char *command = comm->words->word;
-    
-    // check for builtin command
-    if (is_builtin_cmd(command)) {
-        return execute_command_builtin(comm);
-    }
     
     // check if we should do piping
     if (comm->pipe_to != NULL) {
@@ -862,9 +998,7 @@ int execute_command(Command *comm) {
     }
     
     char *path = lookup_command(comm);
-    if (path == NULL) {
-        return 0;
-    }
+    if (path == NULL) return 0;
     
     char **args = wordlist_to_argv(comm->words);
     
@@ -922,7 +1056,13 @@ int execute_command(Command *comm) {
         }
     }
     
-    result = execute_command_simple(path, args, fileds, last_redir_act, comm->type, *comm->flags);
+    // check for builtin command
+    if (is_builtin_cmd(command)) {
+        result = execute_command_builtin(comm, fileds, last_redir_act);
+    } else {
+        result = execute_command_simple(path, args, fileds, last_redir_act,
+                                        comm->type, *comm->flags);
+    }
     // close opened file descriptors
     if (fileds[PIPE_READ] > 0 ) close(fileds[PIPE_READ]);
     if (fileds[PIPE_WRITE] > 0) close(fileds[PIPE_WRITE]);
@@ -1159,7 +1299,7 @@ int parse_command(int ibuff_start, Command *cmd) {
                 if (ibuffer[i] != ' ') {
                     skipwrd = 1;
                 }
-                char *p = word+startpos+1;
+                char *p = word+startpos;
                 HashItem *var = hashtable_find(global_hashtable, p);
                 if (var != NULL && var->data != NULL) {
                     if (is_debugging == '1') printf("=> %s\n", var->data);
@@ -1191,13 +1331,15 @@ int parse_command(int ibuff_start, Command *cmd) {
             }
             // special check for background job
             if (pos == 1 && word[0] == '&') {
-                cmd->flags->cmd_bg = 1;
+                // set the global command
+                global_command->flags->cmd_bg = 1;
                 break; // ignore anything after &
             }
             if (skipwrd == 0) {
                 if (quoted == 0) {
                     wl->process = '*';
                 }
+                // accumulate into current wordlist
                 if (wl->word != NULL) {
                     char *nword = malloc( (strlen(wl->word)+strlen(word)+1)*sizeof(char) );
                     strcpy(nword, wl->word);
@@ -1211,7 +1353,7 @@ int parse_command(int ibuff_start, Command *cmd) {
                 wl->next = alloc_word_list();
                 wl = wl->next;
             } else {
-                // accumulate into current wordlist
+                // yes this part is redundant
                 if (wl->word != NULL) {
                     char *nword = malloc( (strlen(wl->word)+strlen(word)+1)*sizeof(char) );
                     strcpy(nword, wl->word);
@@ -1300,36 +1442,9 @@ int read_loop() {
 
 void init_env_vars() {
     username = getenv("USER");
-    char *path = getenv("PATH");
-    
-    // parse the PATH into an array of paths
-    int i = (int)strlen(path);
-    char *cpath = malloc(i*sizeof(char));
-    strcpy(cpath, path);
-    i = 0;
-    char *pch = strtok(cpath, ":");
-    // first count the number of paths
-    while (pch != NULL) {
-        i++;
-        pch = strtok(NULL, ":");
-    }
-    var_path_count = i;
-    var_paths = malloc( i*sizeof(char*) );
-    strcpy(cpath, path);
-    i = 0;
-    pch = strtok(cpath, ":");
-    // store each path
-    while (pch != NULL) {
-        int l = (int)strlen(pch);
-        char *ps = malloc( (l+1)*sizeof(char) );
-        strcpy(ps, pch);
-        var_paths[i] = ps;
-        i++;
-        pch = strtok(NULL, ":");
-    }
-    free(cpath);
     
     global_hashtable = alloc_hashtable();
+    msh_hash_all_commands();
     
     global_command = alloc_command();
     global_command->words = alloc_word_list();
@@ -1339,7 +1454,7 @@ void cleanup() {
     flush_toilet();
     dealloc_command(global_command);
     dealloc_hashtable(global_hashtable);
-    printf("\n[msh completed]\n\n");
+    if (subshell == 0) printf("\n[msh completed]\n\n");
 }
 
 int main() {
