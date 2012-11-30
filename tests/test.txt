@@ -1,98 +1,61 @@
-MacPro:msh marica$ 
-MacPro:msh marica$ ./msh < tests/test.txt
-> ### Demonstrating shell variables
-> set A ap
-> set B le
-> echo I like ?A"p"?B
-I like apple
-> echo ?A?B?unknown
-aple
-
-> ### Demonstrating built-in functions
-> which echo
-echo: shell built-in command
-> which kill
-kill: shell built-in command
-
-> ### Demonstrating commands
-> ls *
-README.md	makefile	msh		msh.c
-
-tests:
-a.out		hello.c		output.txt	test.txt
-> sleep 2 &
-bg: 6524
-> ps aux | grep sleep
-marica    6527   0.0  0.0  2435120    480 s000  R+   12:48AM   0:00.00 grep sleep
-marica    6524   0.0  0.0  2426644    320 s000  S+   12:48AM   0:00.00 sleep 2
-
-While sleep is sleeping...
-do something useful
-> ifconfig > my_network
-Let's append EOM to my_network
-> echo >> my_network
-> echo End of Message >> my_network
-Printing the my_network file now
-_______________________________
-lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
-	inet6 ::1 prefixlen 128 
-	inet6 fe80::1%lo0 prefixlen 64 scopeid 0x1 
-	inet 127.0.0.1 netmask 0xff000000 
-gif0: flags=8010<POINTOPOINT,MULTICAST> mtu 1280
-stf0: flags=0<> mtu 1280
-en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	ether 00:17:f2:04:5b:c0 
-	media: autoselect
-	status: inactive
-en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	ether 00:17:f2:04:5b:c1 
-	inet6 fe80::217:f2ff:fe04:5bc1%en1 prefixlen 64 scopeid 0x5 
-	inet 192.168.1.198 netmask 0xffffff00 broadcast 192.168.1.255
-	media: autoselect (1000baseT <full-duplex,flow-control>)
-	status: active
-fw0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 2030
-	lladdr 00:16:cb:ff:fe:6f:fb:1c 
-	media: autoselect <full-duplex>
-	status: inactive
-vnic0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	ether 00:1c:42:00:00:08 
-	inet 10.211.55.2 netmask 0xffffff00 broadcast 10.211.55.255
-	inet6 fe80::21c:42ff:fe00:8%vnic0 prefixlen 64 scopeid 0x7 
-	inet6 fdb2:2c26:f4e4::1 prefixlen 64 
-	media: autoselect
-	status: active
-vnic1: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	ether 00:1c:42:00:00:09 
-	inet 10.37.129.2 netmask 0xffffff00 broadcast 10.37.129.255
-	inet6 fe80::21c:42ff:fe00:9%vnic1 prefixlen 64 scopeid 0x8 
-	inet6 fdb2:2c26:f4e4:1::1 prefixlen 64 
-	media: autoselect
-	status: active
-
-end of message
-_______________________________
-
-I will remove the my_network file now
-> rm my_network
-
-Let's check back on the sleep...
-> ps aux | grep sleep
-marica    6550   0.0  0.0  2435120    480 s000  R+   12:48AM   0:00.00 grep sleep
-marica    6524   0.0  0.0  2426644    320 s000  S+   12:48AM   0:00.00 sleep 2
-
-Let's sleep some more, be patient...
-
-Look, no sleep!
-> ps aux | grep sleep
-marica    6558   0.0  0.0  2435120    480 s000  R+   12:48AM   0:00.00 grep sleep
-
-> ### Other stuff
-> cd ~
-> pwd
-/Users/marica
-That should be your home directory.
-
-This is the end.
-
-[msh completed]
-
+echo "> ### Demonstrating shell variables"
+echo "> set A ap"
+set A ap
+echo "> set B le"
+set B le
+echo "> echo I like ?A\"p\"?B"
+echo I like ?A"p"?B
+echo "> echo ?A?B?unknown"
+echo ?A?B?unknown
+echo
+echo "> ### Demonstrating built-in functions"
+echo "> which echo"
+which echo
+echo "> which kill"
+which kill
+echo
+echo "> ### Demonstrating commands"
+echo "> ls *"
+ls *
+echo "> sleep 2 &"
+sleep 2 &
+echo "> ps aux | grep sleep"
+ps aux | grep sleep
+echo
+echo While sleep is sleeping...
+echo do something useful
+echo "> ifconfig > my_network"
+ifconfig > my_network
+echo Let us append EOM to my_network
+echo "> echo >> my_network"
+echo >> my_network
+echo "> echo End of Message >> my_network"
+echo end of message >> my_network
+echo Printing the my_network file now
+echo _______________________________
+cat < my_network
+echo _______________________________
+echo
+echo I will remove the my_network file now
+echo "> rm my_network"
+rm my_network
+echo
+echo Let us check back on the sleep...
+echo "> ps aux | grep sleep"
+ps aux | grep sleep
+echo
+echo Let us sleep some more, be patient...
+sleep 2
+echo
+echo Look, no sleep!
+echo "> ps aux | grep sleep"
+ps aux | grep sleep
+echo
+echo "> ### Other stuff"
+echo "> cd ~"
+cd ~
+echo "> pwd"
+pwd
+echo That should be your home directory.
+echo
+echo This is the end.

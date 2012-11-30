@@ -7,7 +7,6 @@ It has most of the basic featues you would expect in a shell, including:
 - execute (built-in) commands and files
 - shell variables
 - background jobs
-- filename expansion
 - piping and redirection
 - exit traps
 

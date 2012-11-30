@@ -10,7 +10,6 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <setjmp.h>
-#include <wordexp.h>
 
 #define MAX_CHAR_BUFF_LEN  512
 #define MAX_HASHTABLE_LEN  8192
@@ -107,8 +106,7 @@ Command *global_command;
 
 // This is here because it is important
 int execute_command_simple(char *, char **, int *,
-                           enum redir_action, enum command_type,
-                           command_flags);
+                           enum redir_action, command_flags);
 
 void trap_exit(int s) {
     if (chpid > 0) {
@@ -133,11 +131,24 @@ void trap_exit(int s) {
     }
 }
 
+void chld_trap(int s) {
+    // wait on bg child process to really finish
+    int pid = wait(NULL);
+    if (pid < 0) {
+        // wait went wrong
+        return;
+    }
+    if (pid != chpid) {
+        bgchld--;
+    }
+}
+
 void init_exit_traps() {
     signal(SIGINT, trap_exit);
     signal(SIGABRT, trap_exit);
     signal(SIGTERM, trap_exit);
     signal(SIGSEGV, trap_exit);
+    signal(SIGCHLD, chld_trap);
 }
 
 void restore_traps()  {
@@ -146,23 +157,6 @@ void restore_traps()  {
     signal(SIGTERM, SIG_DFL);
     signal(SIGSEGV, SIG_DFL);
     signal(SIGCHLD, SIG_DFL);
-}
-
-void chld_trap(int s) {
-    // wait on bg child process to really finish
-    int pid = waitpid(-1, NULL, WNOHANG);
-    if (pid < 0) {
-        // waitpid went wrong
-        return;
-    }
-    if (pid != chpid && chpid != 0) {
-        bgchld--;
-    }
-}
-
-void init_child_traps() {
-    // this is here for background jobs
-    signal(SIGCHLD, chld_trap);
 }
 
 void dealloc_hashitem(HashItem *i) {
@@ -340,19 +334,31 @@ Command* alloc_command() {
 int is_directory(const char *path) {
     struct stat info;
     if (stat(path, &info) != 0) {
-        return (-1);
+        return -1;
     }
-    if (S_ISDIR(info.st_mode) != 0 && S_ISREG(info.st_mode) == 0) return 0;
+    if ((info.st_mode & S_IFMT) == S_IFDIR) return 0;
     return -1;
 }
 
-/* If path is a file, returns 0, otherwise -1 */
+/* If path is a regular file, returns 0, otherwise -1 */
 int is_file(const char *path) {
     struct stat info;
     if (stat(path, &info) != 0) {
-        return (-1);
+        return -1;
     }
-    if (S_ISDIR(info.st_mode) == 0 && S_ISREG(info.st_mode) != 0) return 0;
+    if ((info.st_mode & S_IFMT) == S_IFREG) return 0;
+    return -1;
+}
+
+/* If path is an executable file, returns 0, otherwise -1 */
+int is_executable_file(const char *path) {
+    struct stat info;
+    if (stat(path, &info) != 0) {
+        return -1;
+    }
+    if (info.st_mode & S_IXUSR) return 0;
+    if (info.st_mode & S_IXGRP) return 0;
+    if (info.st_mode & S_IXOTH) return 0;
     return -1;
 }
 
@@ -416,8 +422,8 @@ char** wordlist_to_argv(WordList *list) {
         l = l->next;
         /* Do additional processing here if process is set. */
         if (l != NULL && l->process > 0) {
+            /* tilde expansion */
             if (strchr(l->word, '~') != NULL) {
-                // tilde expansion
                 char *homedir = getenv("HOME");
                 int hlen = (int)strlen(homedir);
                 if (hlen < 0) {
@@ -444,39 +450,6 @@ char** wordlist_to_argv(WordList *list) {
                     free(l->word);
                     l->word = result;
                 }
-            }
-            if (strchr(l->word, '*') != NULL || strchr(l->word, '?') != NULL) {
-                // handle wildcards
-                wordexp_t p;
-                int r = wordexp(l->word, &p, WRDE_NOCMD);
-                if (r == 0) {
-                    int i;
-                    char **w;
-                    w = p.we_wordv;
-                    if (is_debugging == '1') {
-                        printf("[%s] => %i matches\n", l->word, (int)p.we_wordc);
-                    }
-                    for (i = 0; i < p.we_wordc; i++) {
-                        if (i > 0) {
-                            if (l->next == NULL) {
-                                l->next = alloc_word_list();
-                                len++;
-                            }
-                            l = l->next;
-                        }
-                        if (l->word != NULL) free(l->word);
-                        l->word = strdup(w[i]);
-                    }
-                    // need a NULL at the end
-                    if (l->next == NULL) {
-                        l->next = alloc_word_list();
-                        len++;
-                    }
-                }
-                else if (r == WRDE_SYNTAX) {
-                    printf("syntax error near %s\n", l->word);
-                }
-                wordfree(&p);
             }
         }
     }
@@ -506,6 +479,12 @@ char* lookup_command(Command *comm) {
         path[0] = 0;
         strcat(path, pwd);
         strcat(path, file);
+        // make sure path contains executable file
+        if (is_executable_file(path) == -1) {
+            printf("%s: is a file\n", path);
+            free(path);
+            return NULL;
+        }
     }
     else {
         // look in the hash table
@@ -513,7 +492,8 @@ char* lookup_command(Command *comm) {
         if (i != NULL) {
             if (i->data != NULL) {
                 path = strdup(i->data);
-            } else {
+            }
+            else if (i->bfun != NULL) {
                 path = strdup(command);
             }
         }
@@ -523,7 +503,12 @@ char* lookup_command(Command *comm) {
             printf("%s: is a directory\n", command);
         } else {
             if ( is_file(command) == 0 ) {
-                printf("%s: is a file\n", command);
+                // check if file is executable
+                if (is_executable_file(command) == 0) {
+                    path = strdup(command);
+                } else {
+                    printf("%s: is a file\n", command);
+                }
             } else {
                 printf("%s: command not found\n", command);
             }
@@ -559,11 +544,6 @@ int do_piping(int pipe_in, int pipe_out, char *path, char **args) {
             return -1;
         }
         exit(0);
-    } else {
-        bgchld++;
-        init_child_traps();
-        setpgid(0, 0);
-        // no wait() here
     }
     return pid;
 }
@@ -581,7 +561,9 @@ int execute_command_pipeline(Command *comm) {
         
         // prepare for forking
         char *path = lookup_command(cmd);
-        if (path == NULL) return 0;
+        if (path == NULL) {
+            return 0;
+        }
         char **args = wordlist_to_argv(cmd->words);
         
         // check for redirection
@@ -617,7 +599,7 @@ int execute_command_pipeline(Command *comm) {
             if (is_debugging == '1') {
                 printf("%s: error %d during pipe\n", path, errno);
             }
-            exit(0);
+            return 0;
         }
     }
     
@@ -642,20 +624,20 @@ int execute_command_pipeline(Command *comm) {
         last_flag = r_input_output;
     }
     
+    signal(SIGCHLD, chld_trap);
     char **args = wordlist_to_argv(cmd->words);
-    status = execute_command_simple(path, args, filedes, last_flag, c_foreground,
-                                    *global_command->flags);
+    status = execute_command_simple(path, args, filedes, last_flag, *global_command->flags);
     
     if (filedes[PIPE_READ] > 0) {
         close(filedes[PIPE_READ]);
     }
     free(args);
+
     return status;
 }
 
 int execute_command_simple(char *path, char **args, int fds[2],
                            enum redir_action fd_flag,
-                           enum command_type cmd_type,
                            command_flags flags)
 {
     // fork and execute
@@ -698,7 +680,6 @@ int execute_command_simple(char *path, char **args, int fds[2],
             // execv failed
             perror(path);
         }
-        
         exit(0);
     }
     else {
@@ -706,7 +687,7 @@ int execute_command_simple(char *path, char **args, int fds[2],
         if (flags.cmd_bg) {
             // Note: background process stdout/stderr not redirected
             bgchld++;
-            init_child_traps();
+            signal(SIGCHLD, chld_trap);
             setpgid(0, 0);
             printf("bg: %i\n", pid);
             return 0;
@@ -994,7 +975,12 @@ int execute_command(Command *comm) {
     
     // check if we should do piping
     if (comm->pipe_to != NULL) {
-        return execute_command_pipeline(comm);
+        // do not wait for processes in the pipeline
+        // except for the last one
+        signal(SIGCHLD, SIG_IGN);
+        int status = execute_command_pipeline(comm);
+        signal(SIGCHLD, chld_trap); // restore handler
+        return status;
     }
     
     char *path = lookup_command(comm);
@@ -1056,12 +1042,10 @@ int execute_command(Command *comm) {
         }
     }
     
-    // check for builtin command
     if (is_builtin_cmd(command)) {
         result = execute_command_builtin(comm, fileds, last_redir_act);
     } else {
-        result = execute_command_simple(path, args, fileds, last_redir_act,
-                                        comm->type, *comm->flags);
+        result = execute_command_simple(path, args, fileds, last_redir_act, *comm->flags);
     }
     // close opened file descriptors
     if (fileds[PIPE_READ] > 0 ) close(fileds[PIPE_READ]);
@@ -1082,6 +1066,7 @@ void flush_toilet() {
     dealloc_command(global_command);
     global_command = alloc_command();
     global_command->words = alloc_word_list();
+    fflush(NULL);
 }
 
 void getchar_loop() {
@@ -1335,35 +1320,27 @@ int parse_command(int ibuff_start, Command *cmd) {
                 global_command->flags->cmd_bg = 1;
                 break; // ignore anything after &
             }
+            
+            // accumulate into current wordlist
+            if (wl->word != NULL) {
+                char *nword = malloc( (strlen(wl->word)+strlen(word)+1)*sizeof(char) );
+                strcpy(nword, wl->word);
+                strcat(nword, word);
+                free(wl->word);
+                wl->word = nword;
+            } else {
+                wl->word = malloc( (strlen(word)+1)*sizeof(char) );
+                strcpy(wl->word, word);
+            }
+            
             if (skipwrd == 0) {
                 if (quoted == 0) {
+                    // do additional processing in wordlist_to_argv()
                     wl->process = '*';
-                }
-                // accumulate into current wordlist
-                if (wl->word != NULL) {
-                    char *nword = malloc( (strlen(wl->word)+strlen(word)+1)*sizeof(char) );
-                    strcpy(nword, wl->word);
-                    strcat(nword, word);
-                    free(wl->word);
-                    wl->word = nword;
-                } else {
-                    wl->word = malloc( (strlen(word)+1)*sizeof(char) );
-                    strcpy(wl->word, word);
                 }
                 wl->next = alloc_word_list();
                 wl = wl->next;
             } else {
-                // yes this part is redundant
-                if (wl->word != NULL) {
-                    char *nword = malloc( (strlen(wl->word)+strlen(word)+1)*sizeof(char) );
-                    strcpy(nword, wl->word);
-                    strcat(nword, word);
-                    free(wl->word);
-                    wl->word = nword;
-                } else {
-                    wl->word = malloc( (strlen(word)+1)*sizeof(char) );
-                    strcpy(wl->word, word);
-                }
                 skipwrd = 0;
             }
             
@@ -1393,7 +1370,7 @@ int parse_command(int ibuff_start, Command *cmd) {
 }
 
 /* Returns MSH_EXITINT indicating shell should terminate,
- otherwise always 0. */
+   otherwise always 0. */
 int read_loop() {
     // setup jump
     int status = setjmp(toplevel_jmp);
@@ -1413,7 +1390,7 @@ int read_loop() {
     }
     
     if (isatty(STDIN_FILENO) == 1) {
-        // prompt if terminal
+        // prompt if has terminal
         printf("%s%% ", username);
     }
     
