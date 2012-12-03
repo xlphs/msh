@@ -26,9 +26,7 @@ const int FD_WRITE = 1;
 /* The current user's name */
 static char *username;
 
-/* Set global debugging on or off
- To turn on debugging: debug 1
- To turn off debugging: debug 0 */
+/* Set global debugging on or off */
 static unsigned char is_debugging = '0';
 
 /* Character Input Buffer */
@@ -768,6 +766,7 @@ int msh_exit(Command *comm) {
     return MSH_EXITINT;
 }
 
+/* Change current directory */
 int msh_cd(Command *comm) {
     char **argv = wordlist_to_argv(comm->words);
     char *p = argv[1];
@@ -806,11 +805,13 @@ int msh_cd(Command *comm) {
     return 0;
 }
 
+/* Print current directory */
 int msh_pwd(Command *comm) {
     printf("%s\n", getenv("PWD"));
     return 0;
 }
 
+/* Create a new directory */
 int msh_mkdir(Command *comm) {
     WordList *dirname = comm->words->next;
     if (dirname->word == NULL) {
@@ -824,6 +825,7 @@ int msh_mkdir(Command *comm) {
     return 0;
 }
 
+/* Mimics the standard version of echo */
 int msh_echo(Command *comm) {
     if (comm->words->next == NULL) {
         printf("\n");
@@ -842,6 +844,7 @@ int msh_echo(Command *comm) {
     return 0;
 }
 
+/* Look up the path of given command */
 int msh_which(Command *comm) {
     WordList *cmd = comm->words->next;
     if (cmd->word == NULL) {
@@ -871,6 +874,8 @@ char *shellvar_format(const char *s) {
     return var;
 }
 
+/* Set a shell variable.
+   Example: set x 10 */
 int msh_set(Command *comm) {
     WordList *name = comm->words->next;
     if (name->word == NULL) return 0;
@@ -895,6 +900,8 @@ int msh_set(Command *comm) {
     return 0;
 }
 
+/* Unset a shell variable.
+   Example: unset x */
 int msh_unset(Command *comm) {
     WordList *name = comm->words->next;
     if (name->word == NULL) return 0;
@@ -906,18 +913,28 @@ int msh_unset(Command *comm) {
     return 0;
 }
 
+/* Set global debugging on or off.
+   To turn on debugging: debug 1
+   To turn off debugging: debug 0 */
 int msh_setdebug(Command *comm) {
     WordList *wl = comm->words->next;
-    if (wl->word == NULL) return 0;
+    if (wl->word == NULL) {
+        printf("debug: %c\n", is_debugging);
+        return 0;
+    }
     is_debugging = *wl->word;
     return 0;
 }
 
+/* Look up all available system commands again.
+   Example: rehash */
 int msh_rehash(Command *comm) {
     msh_hash_all_commands();
     return 0;
 }
 
+/* Send a signal to a process.
+   Example: kill -9 21345 */
 int msh_sendsignal(Command *comm) {
     WordList *w_signal = comm->words->next;
     if (w_signal->word == NULL) return 0;
